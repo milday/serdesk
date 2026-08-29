@@ -30,6 +30,41 @@ class ServiceDeskAutomation:
         self.setup_log = []
         self.role_already_selected = False
         self.detected_role = None
+        self.ticket_file = "tickets.xlsx"
+
+    @staticmethod
+    def _plain_cell_text(value):
+        """Turn an Excel cell value into text. Unevaluated formulas count as empty."""
+        if value is None:
+            return ""
+        text = str(value).strip()
+        if not text or text.lower() == "none" or text.startswith("="):
+            return ""
+        return text
+
+    def prepare_ticket_fields(self, subject_value, description_value, description_formula=None):
+        """Return (subject, description, skip_reason_or_none).
+
+        A row is valid if Subject (column A) has text. Empty Description (column B)
+        is filled with 'Mohon dilakukan {subject}'. Excel CONCAT formulas that were
+        never calculated also look empty when opened with data_only=True.
+        """
+        subject = self._plain_cell_text(subject_value)
+        description = self._plain_cell_text(description_value)
+        if not description:
+            formula = str(description_formula or "").strip()
+            if formula.startswith("=") and subject:
+                description = f"Mohon dilakukan {subject}"
+            else:
+                description = self._plain_cell_text(description_formula)
+
+        if not subject:
+            return "", "", "empty subject"
+
+        if not description:
+            description = f"Mohon dilakukan {subject}"
+            return subject, description, None
+        return subject, description, None
 
     # Any of these already shown as the dashboard role button means skip the picker.
     KNOWN_ROLES = (
@@ -843,20 +878,21 @@ class ServiceDeskAutomation:
     def process_tickets(self):
         """Process tickets from Excel file"""
         try:
-            print("Loading Excel file: tickets.xlsx")
+            excel_file = self.ticket_file or "tickets.xlsx"
+            print(f"Loading Excel file: {excel_file}")
 
-            if not os.path.exists('tickets.xlsx'):
-                print("❌ tickets.xlsx file not found!")
+            if not os.path.exists(excel_file):
+                print(f"❌ {excel_file} file not found!")
                 return False
 
             # Load workbook for reading values
             print("Loading Excel file for reading values...")
-            workbook_read = openpyxl.load_workbook('tickets.xlsx', data_only=True)
+            workbook_read = openpyxl.load_workbook(excel_file, data_only=True)
             worksheet_read = workbook_read.active
 
             # Load workbook for saving (preserve formulas)
             print("Loading Excel file for preserving formulas...")
-            workbook_save = openpyxl.load_workbook('tickets.xlsx', data_only=False)
+            workbook_save = openpyxl.load_workbook(excel_file, data_only=False)
             worksheet_save = workbook_save.active
 
             if not worksheet_read or not worksheet_save:
@@ -865,6 +901,11 @@ class ServiceDeskAutomation:
 
             print(f"✅ Excel files loaded")
             print(f"Total rows: {worksheet_read.max_row}")
+            header = [
+                worksheet_read.cell(row=1, column=col).value
+                for col in range(1, min(4, (worksheet_read.max_column or 1) + 1))
+            ]
+            print(f"Header row: {header}")
 
             successful_tickets = 0
             failed_tickets = 0
@@ -876,20 +917,29 @@ class ServiceDeskAutomation:
                     # Get data from Excel (using the read workbook for calculated values)
                     subject_cell = worksheet_read.cell(row=row_num, column=1)
                     description_cell = worksheet_read.cell(row=row_num, column=2)
+                    description_formula_cell = worksheet_save.cell(row=row_num, column=2)
 
                     # Debug: Show raw cell values
                     print(f"🔍 Row {row_num} - Raw values:")
                     print(f"  Subject cell: '{subject_cell.value}' (type: {type(subject_cell.value)})")
                     print(f"  Description cell: '{description_cell.value}' (type: {type(description_cell.value)})")
+                    if description_formula_cell.value not in (None, description_cell.value):
+                        print(f"  Description formula: '{description_formula_cell.value}'")
 
-                    subject = str(subject_cell.value or "").strip()
-                    description = str(description_cell.value or "").strip()
+                    subject, description, skip_reason = self.prepare_ticket_fields(
+                        subject_cell.value,
+                        description_cell.value,
+                        description_formula_cell.value,
+                    )
 
                     print(f"  Processed - Subject: '{subject}', Description: '{description}'")
 
-                    if not subject or not description:
-                        print(f"⚠️ Skipping row {row_num}: Empty data")
+                    if skip_reason or not subject:
+                        print(f"⚠️ Skipping row {row_num}: Empty subject")
                         continue
+
+                    if not self._plain_cell_text(description_cell.value):
+                        print(f"  ℹ️ Description empty — using '{description}'")
 
                     print(f"\n📋 Processing ticket {row_num - 1}")
                     print(f"Subject: {subject}")
@@ -930,7 +980,7 @@ class ServiceDeskAutomation:
                         results.append(f"Ticket {row_num - 1}: FAILED - Submission failed")
 
                     # Save Excel after each ticket (using the save workbook to preserve formulas)
-                    workbook_save.save('tickets.xlsx')
+                    workbook_save.save(excel_file)
 
                 except Exception as e:
                     print(f"❌ Error processing ticket {row_num - 1}: {str(e)}")
@@ -938,7 +988,7 @@ class ServiceDeskAutomation:
                     results.append(f"Ticket {row_num - 1}: FAILED - {str(e)}")
 
             # Final save (using the save workbook to preserve formulas)
-            workbook_save.save('tickets.xlsx')
+            workbook_save.save(excel_file)
 
             # Close workbooks to release file handles
             workbook_read.close()
