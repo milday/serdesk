@@ -21,6 +21,52 @@ class ServiceDeskAutomation:
         self.driver = None
         self.browser_type = "firefox"  # Default to Firefox
         self.location = ""
+        self.role_already_selected = False
+
+    # ExtJS auto-ids like ext-gen50 change between sessions; match by type,
+    # class, and visible role text. The recorded id is only a fallback.
+    L2_L3_ROLE_BUTTON_XPATH = (
+        "//button[@type='button' and contains(@class, 'x-btn-text') "
+        "and contains(normalize-space(.), 'L2 / L3 Analyst')]"
+    )
+    ROLE_PICKER_XPATH = "/html/body/div[4]/div/form/div[3]"
+    ROLE_SUBMIT_XPATH = "/html/body/div[4]/div/form/div[4]/div/button"
+
+    def is_l2_l3_analyst_already_active(self):
+        """True if dashboard already shows the L2 / L3 Analyst role button.
+
+        After login, HEAT may land on the dashboard with the current role already
+        applied (ExtJS button, e.g. id=ext-gen50 class=x-btn-text). In that case
+        the role-picker form is not shown and must be skipped.
+        """
+        if not self.driver:
+            return False
+
+        try:
+            for btn in self.driver.find_elements(By.XPATH, self.L2_L3_ROLE_BUTTON_XPATH):
+                if btn.is_displayed():
+                    return True
+        except Exception:
+            pass
+
+        try:
+            btn = self.driver.find_element(By.ID, "ext-gen50")
+            if btn.is_displayed() and "L2 / L3 Analyst" in (btn.text or ""):
+                return True
+        except NoSuchElementException:
+            pass
+
+        return False
+
+    def _role_picker_visible(self):
+        """True if the post-login role picker form is on screen."""
+        if not self.driver:
+            return False
+        try:
+            el = self.driver.find_element(By.XPATH, self.ROLE_PICKER_XPATH)
+            return el.is_displayed()
+        except NoSuchElementException:
+            return False
         
     def setup_driver(self, headless=False):
         """Initialize the WebDriver"""
@@ -145,19 +191,32 @@ class ServiceDeskAutomation:
             return False
     
     def select_role(self):
-        """Select the Self Service User role"""
+        """Select a role, or skip if L2 / L3 Analyst is already active on the dashboard."""
         try:
             if not self.driver:
                 print("❌ WebDriver not initialized")
                 return False
-                
+
+            self.role_already_selected = False
             print("Looking for role selection...")
-            time.sleep(5)
-            
+
+            # Wait until either the dashboard role button or the role picker appears.
+            try:
+                WebDriverWait(self.driver, 15).until(
+                    lambda d: self.is_l2_l3_analyst_already_active() or self._role_picker_visible()
+                )
+            except TimeoutException:
+                print("⚠️ Neither L2 / L3 Analyst button nor role picker appeared yet")
+
+            if self.is_l2_l3_analyst_already_active():
+                self.role_already_selected = True
+                print("✅ L2 / L3 Analyst already detected — skipping role selection")
+                return True
+
             # Try to find and click role
             try:
                 role_div = WebDriverWait(self.driver, 10).until(
-                    EC.element_to_be_clickable((By.XPATH, "/html/body/div[4]/div/form/div[3]"))
+                    EC.element_to_be_clickable((By.XPATH, self.ROLE_PICKER_XPATH))
                 )
                 role_div.click()
                 print("✅ Role selected")
@@ -168,7 +227,7 @@ class ServiceDeskAutomation:
             # Submit role selection
             try:
                 submit_button = WebDriverWait(self.driver, 10).until(
-                    EC.element_to_be_clickable((By.XPATH, "/html/body/div[4]/div/form/div[4]/div/button"))
+                    EC.element_to_be_clickable((By.XPATH, self.ROLE_SUBMIT_XPATH))
                 )
                 submit_button.click()
                 print("✅ Role submitted")
