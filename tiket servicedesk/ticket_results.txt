@@ -1,0 +1,6 @@
+SERVICEDESK TICKET PROCESSING RESULTS
+==================================================
+Total processed: 0
+Successful: 0
+Failed: 0
+DETAILED RESULTS:
