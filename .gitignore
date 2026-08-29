@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Driver download caches (bundled geckodriver binaries are kept)
+tiket servicedesk/drivers/.wdm/
+tiket servicedesk/drivers/selenium-cache/
+tiket servicedesk/drivers/**/chromedriver
+tiket servicedesk/drivers/**/chromedriver.exe

@@ -1,5 +1,7 @@
 import os
+import sys
 import time
+import shutil
 import openpyxl
 from datetime import datetime
 from selenium import webdriver
@@ -13,74 +15,298 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.chrome.options import Options as ChromeOptions
 from selenium.webdriver.support.ui import Select
-import sys
+
+# Keep downloaded drivers in the project so later runs work offline.
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+DRIVERS_DIR = os.path.join(APP_DIR, "drivers")
+
 
 class ServiceDeskAutomation:
     def __init__(self):
         self.url = "https://servicedesk.adira.co.id/HEAT/"
         self.driver = None
-        self.browser_type = "firefox"  # Default to Firefox
+        self.browser_type = "auto"
         self.location = ""
-        
+        self.setup_log = []
+
+    def _log_setup(self, message):
+        print(message)
+        self.setup_log.append(message)
+
+    def _platform_key(self):
+        if os.name == "nt":
+            return "windows"
+        if sys.platform == "darwin":
+            return "macos"
+        return "linux"
+
+    def _driver_names(self, base_name):
+        names = [base_name]
+        if os.name == "nt":
+            names.insert(0, base_name + ".exe")
+        else:
+            names.append(base_name + ".exe")
+        return names
+
+    def _ensure_driver_cache(self):
+        os.makedirs(os.path.join(DRIVERS_DIR, self._platform_key()), exist_ok=True)
+        selenium_cache = os.path.join(DRIVERS_DIR, "selenium-cache")
+        os.makedirs(selenium_cache, exist_ok=True)
+        # Selenium Manager (built into Selenium 4.6+) stores drivers here.
+        os.environ["SE_CACHE_PATH"] = selenium_cache
+        return selenium_cache
+
+    def _find_existing_driver(self, base_name):
+        names = self._driver_names(base_name)
+        search_roots = [
+            os.path.join(DRIVERS_DIR, self._platform_key()),
+            DRIVERS_DIR,
+        ]
+        for root in search_roots:
+            for name in names:
+                path = os.path.join(root, name)
+                if os.path.isfile(path):
+                    return os.path.abspath(path)
+
+        if os.path.isdir(DRIVERS_DIR):
+            for dirpath, _, filenames in os.walk(DRIVERS_DIR):
+                for name in names:
+                    if name in filenames:
+                        path = os.path.join(dirpath, name)
+                        if os.path.isfile(path) and not path.lower().endswith(".zip"):
+                            return os.path.abspath(path)
+
+        for name in names:
+            found = shutil.which(name)
+            if found:
+                return found
+        return None
+
+    def _find_browser_binary(self, candidates):
+        for path in candidates:
+            if path and os.path.isfile(path):
+                return path
+        return None
+
+    def _find_firefox_binary(self):
+        env_path = os.environ.get("FIREFOX_BINARY") or os.environ.get("FIREFOX_BIN")
+        which = shutil.which("firefox") or shutil.which("firefox.exe")
+        return self._find_browser_binary([
+            env_path,
+            which,
+            r"C:\Program Files\Mozilla Firefox\firefox.exe",
+            r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe",
+            os.path.expandvars(r"%LOCALAPPDATA%\Mozilla Firefox\firefox.exe"),
+            "/usr/bin/firefox",
+            "/usr/lib/firefox/firefox",
+            "/snap/bin/firefox",
+            "/Applications/Firefox.app/Contents/MacOS/firefox",
+        ])
+
+    def _find_chrome_binary(self):
+        env_path = os.environ.get("CHROME_BINARY") or os.environ.get("CHROME_BIN")
+        which = (
+            shutil.which("google-chrome")
+            or shutil.which("google-chrome-stable")
+            or shutil.which("chrome")
+            or shutil.which("chrome.exe")
+            or shutil.which("chromium")
+            or shutil.which("chromium-browser")
+        )
+        return self._find_browser_binary([
+            env_path,
+            which,
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        ])
+
+    def _cache_driver_locally(self, src_path, base_name):
+        if not src_path or not os.path.isfile(src_path):
+            return src_path
+        dest_dir = os.path.join(DRIVERS_DIR, self._platform_key())
+        os.makedirs(dest_dir, exist_ok=True)
+        dest_name = self._driver_names(base_name)[0]
+        dest_path = os.path.join(dest_dir, dest_name)
+        try:
+            if os.path.abspath(src_path) != os.path.abspath(dest_path):
+                shutil.copy2(src_path, dest_path)
+                if os.name != "nt":
+                    os.chmod(dest_path, 0o755)
+                self._log_setup(f"Cached driver in project folder: {dest_path}")
+            return dest_path
+        except Exception as e:
+            self._log_setup(f"Could not copy driver into project folder: {e}")
+            return src_path
+
     def setup_driver(self, headless=False):
-        """Initialize the WebDriver"""
-        try:
-            print(f"Setting up {self.browser_type.capitalize()} WebDriver...")
-            
-            if self.browser_type == "firefox":
-                return self._setup_firefox_driver(headless)
-            else:
-                return self._setup_chrome_driver(headless)
-                
-        except Exception as e:
-            print(f"Error in WebDriver setup: {str(e)}")
-            return False
-            
+        """Initialize the WebDriver using local cache, installed browsers, then downloads."""
+        self.setup_log = []
+        self._ensure_driver_cache()
+        requested = (self.browser_type or "auto").strip().lower()
+        if requested == "auto":
+            order = ["firefox", "chrome"]
+        elif requested == "chrome":
+            order = ["chrome", "firefox"]
+        else:
+            order = ["firefox", "chrome"]
+
+        last_error = None
+        for browser in order:
+            self._log_setup(f"Setting up {browser.capitalize()} WebDriver...")
+            try:
+                ok = (
+                    self._setup_firefox_driver(headless)
+                    if browser == "firefox"
+                    else self._setup_chrome_driver(headless)
+                )
+            except Exception as e:
+                ok = False
+                last_error = e
+                self._log_setup(f"{browser.capitalize()} setup error: {e}")
+            if ok:
+                self.browser_type = browser
+                return True
+            if browser != order[-1]:
+                self._log_setup(f"{browser.capitalize()} unavailable, trying the next browser...")
+
+        if last_error:
+            self._log_setup(f"Error in WebDriver setup: {last_error}")
+        return False
+
     def _setup_firefox_driver(self, headless=False):
-        """Initialize Firefox WebDriver"""
-        try:
-            options = FirefoxOptions()
-            
-            if headless:
-                options.add_argument("--headless")
-            
-            # Try to use webdriver-manager
+        """Initialize Firefox using bundled/local geckodriver, then cache/download if needed."""
+        options = FirefoxOptions()
+        if headless:
+            options.add_argument("--headless")
+
+        firefox_bin = self._find_firefox_binary()
+        if firefox_bin:
+            options.binary_location = firefox_bin
+            self._log_setup(f"Using existing Firefox: {firefox_bin}")
+        else:
+            self._log_setup("Firefox browser not found on this computer.")
+            return False
+
+        errors = []
+
+        local_driver = self._find_existing_driver("geckodriver")
+        if local_driver:
             try:
-                from webdriver_manager.firefox import GeckoDriverManager
-                service = FirefoxService(GeckoDriverManager().install())
-                self.driver = webdriver.Firefox(service=service, options=options)
-                print("✅ Firefox WebDriver initialized!")
+                self._log_setup(f"Using local geckodriver: {local_driver}")
+                self.driver = webdriver.Firefox(
+                    service=FirefoxService(local_driver), options=options
+                )
+                self._log_setup("✅ Firefox WebDriver initialized (local driver)!")
                 return True
             except Exception as e:
-                print(f"Firefox setup failed: {str(e)}")
-                return False
-        
+                errors.append(f"local geckodriver: {e}")
+                self._log_setup(f"Local geckodriver failed: {e}")
+
+        try:
+            self._log_setup("Trying Selenium Manager (cache in project drivers/selenium-cache)...")
+            self.driver = webdriver.Firefox(options=options)
+            self._log_setup("✅ Firefox WebDriver initialized (Selenium Manager)!")
+            return True
         except Exception as e:
-            print(f"Firefox setup error: {str(e)}")
-            return False
-            
+            errors.append(f"Selenium Manager: {e}")
+            self._log_setup(f"Selenium Manager Firefox failed: {e}")
+
+        try:
+            from webdriver_manager.core.driver_cache import DriverCacheManager
+            from webdriver_manager.firefox import GeckoDriverManager
+
+            cache_dir = os.path.join(DRIVERS_DIR, ".wdm")
+            os.makedirs(cache_dir, exist_ok=True)
+            # Reuse a previous project download without contacting GitHub.
+            if self._find_existing_driver("geckodriver"):
+                os.environ["WDM_LOCAL"] = "1"
+            self._log_setup(f"Trying webdriver-manager cache at {cache_dir}...")
+            gecko_path = GeckoDriverManager(
+                cache_manager=DriverCacheManager(root_dir=DRIVERS_DIR)
+            ).install()
+            gecko_path = self._cache_driver_locally(gecko_path, "geckodriver")
+            self.driver = webdriver.Firefox(
+                service=FirefoxService(gecko_path), options=options
+            )
+            self._log_setup("✅ Firefox WebDriver initialized (downloaded to project folder)!")
+            return True
+        except Exception as e:
+            errors.append(f"webdriver-manager: {e}")
+            self._log_setup(f"Firefox setup failed: {e}")
+
+        for err in errors:
+            self._log_setup(f"  - {err}")
+        return False
+
     def _setup_chrome_driver(self, headless=False):
-        """Initialize Chrome WebDriver"""
-        try:
-            options = ChromeOptions()
-            
-            if headless:
-                options.add_argument("--headless")
-            
-            # Try to use webdriver-manager
+        """Initialize Chrome using an installed browser and a project-local driver cache."""
+        options = ChromeOptions()
+        if headless:
+            options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+
+        chrome_bin = self._find_chrome_binary()
+        if chrome_bin:
+            options.binary_location = chrome_bin
+            self._log_setup(f"Using existing Chrome: {chrome_bin}")
+        else:
+            self._log_setup("Chrome browser not found on this computer.")
+            return False
+
+        errors = []
+
+        local_driver = self._find_existing_driver("chromedriver")
+        if local_driver:
             try:
-                from webdriver_manager.chrome import ChromeDriverManager
-                service = ChromeService(ChromeDriverManager().install())
-                self.driver = webdriver.Chrome(service=service, options=options)
-                print("✅ Chrome WebDriver initialized!")
+                self._log_setup(f"Using local chromedriver: {local_driver}")
+                self.driver = webdriver.Chrome(
+                    service=ChromeService(local_driver), options=options
+                )
+                self._log_setup("✅ Chrome WebDriver initialized (local driver)!")
                 return True
             except Exception as e:
-                print(f"Chrome setup failed: {str(e)}")
-                return False
-        
+                errors.append(f"local chromedriver: {e}")
+                self._log_setup(f"Local chromedriver failed: {e}")
+
+        try:
+            self._log_setup("Trying Selenium Manager (cache in project drivers/selenium-cache)...")
+            self.driver = webdriver.Chrome(options=options)
+            self._log_setup("✅ Chrome WebDriver initialized (Selenium Manager)!")
+            return True
         except Exception as e:
-            print(f"Chrome setup error: {str(e)}")
-            return False
+            errors.append(f"Selenium Manager: {e}")
+            self._log_setup(f"Selenium Manager Chrome failed: {e}")
+
+        try:
+            from webdriver_manager.chrome import ChromeDriverManager
+            from webdriver_manager.core.driver_cache import DriverCacheManager
+
+            os.makedirs(os.path.join(DRIVERS_DIR, ".wdm"), exist_ok=True)
+            self._log_setup("Trying webdriver-manager for Chrome...")
+            chrome_path = ChromeDriverManager(
+                cache_manager=DriverCacheManager(root_dir=DRIVERS_DIR)
+            ).install()
+            chrome_path = self._cache_driver_locally(chrome_path, "chromedriver")
+            self.driver = webdriver.Chrome(
+                service=ChromeService(chrome_path), options=options
+            )
+            self._log_setup("✅ Chrome WebDriver initialized (downloaded to project folder)!")
+            return True
+        except Exception as e:
+            errors.append(f"webdriver-manager: {e}")
+            self._log_setup(f"Chrome setup failed: {e}")
+
+        for err in errors:
+            self._log_setup(f"  - {err}")
+        return False
     
     def login(self, username, password):
         """Login to ServiceDesk"""
