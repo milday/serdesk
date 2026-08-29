@@ -22,41 +22,61 @@ class ServiceDeskAutomation:
         self.browser_type = "firefox"  # Default to Firefox
         self.location = ""
         self.role_already_selected = False
+        self.detected_role = None
 
-    # ExtJS auto-ids like ext-gen50 change between sessions; match by type,
-    # class, and visible role text. The recorded id is only a fallback.
-    L2_L3_ROLE_BUTTON_XPATH = (
-        "//button[@type='button' and contains(@class, 'x-btn-text') "
-        "and contains(normalize-space(.), 'L2 / L3 Analyst')]"
+    # Any of these already shown as the dashboard role button means skip the picker.
+    KNOWN_ROLES = (
+        "L2 / L3 Analyst",
+        "Mobile Self Service",
+        "Self Service IT",
+        "Self Service User",
+    )
+    ROLE_BUTTON_XPATH = (
+        "//button[@type='button' and contains(@class, 'x-btn-text')]"
     )
     ROLE_PICKER_XPATH = "/html/body/div[4]/div/form/div[3]"
     ROLE_SUBMIT_XPATH = "/html/body/div[4]/div/form/div[4]/div/button"
 
-    def is_l2_l3_analyst_already_active(self):
-        """True if dashboard already shows the L2 / L3 Analyst role button.
+    def _normalize_role_text(self, text):
+        return " ".join((text or "").split())
+
+    def get_active_dashboard_role(self):
+        """Return the already-applied dashboard role name, or None.
 
         After login, HEAT may land on the dashboard with the current role already
-        applied (ExtJS button, e.g. id=ext-gen50 class=x-btn-text). In that case
-        the role-picker form is not shown and must be skipped.
+        applied (ExtJS button, e.g. id=ext-gen50 class=x-btn-text). Match any known
+        role from the picker list, not only L2 / L3 Analyst.
         """
         if not self.driver:
-            return False
+            return None
+
+        known = {self._normalize_role_text(name): name for name in self.KNOWN_ROLES}
 
         try:
-            for btn in self.driver.find_elements(By.XPATH, self.L2_L3_ROLE_BUTTON_XPATH):
-                if btn.is_displayed():
-                    return True
+            for btn in self.driver.find_elements(By.XPATH, self.ROLE_BUTTON_XPATH):
+                if not btn.is_displayed():
+                    continue
+                label = self._normalize_role_text(btn.text)
+                if label in known:
+                    return known[label]
         except Exception:
             pass
 
+        # Fallback: recorded ExtJS id, only if the label is a known role.
         try:
             btn = self.driver.find_element(By.ID, "ext-gen50")
-            if btn.is_displayed() and "L2 / L3 Analyst" in (btn.text or ""):
-                return True
+            if btn.is_displayed():
+                label = self._normalize_role_text(btn.text)
+                if label in known:
+                    return known[label]
         except NoSuchElementException:
             pass
 
-        return False
+        return None
+
+    def is_role_already_active(self):
+        """True if dashboard already shows a known role button."""
+        return self.get_active_dashboard_role() is not None
 
     def _role_picker_visible(self):
         """True if the post-login role picker form is on screen."""
@@ -191,26 +211,29 @@ class ServiceDeskAutomation:
             return False
     
     def select_role(self):
-        """Select a role, or skip if L2 / L3 Analyst is already active on the dashboard."""
+        """Select a role, or skip if any known role is already active on the dashboard."""
         try:
             if not self.driver:
                 print("❌ WebDriver not initialized")
                 return False
 
             self.role_already_selected = False
+            self.detected_role = None
             print("Looking for role selection...")
 
-            # Wait until either the dashboard role button or the role picker appears.
+            # Wait until either a dashboard role button or the role picker appears.
             try:
                 WebDriverWait(self.driver, 15).until(
-                    lambda d: self.is_l2_l3_analyst_already_active() or self._role_picker_visible()
+                    lambda d: self.is_role_already_active() or self._role_picker_visible()
                 )
             except TimeoutException:
-                print("⚠️ Neither L2 / L3 Analyst button nor role picker appeared yet")
+                print("⚠️ Neither an active role button nor role picker appeared yet")
 
-            if self.is_l2_l3_analyst_already_active():
+            active_role = self.get_active_dashboard_role()
+            if active_role:
                 self.role_already_selected = True
-                print("✅ L2 / L3 Analyst already detected — skipping role selection")
+                self.detected_role = active_role
+                print(f"✅ Role '{active_role}' already detected — skipping role selection")
                 return True
 
             # Try to find and click role

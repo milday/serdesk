@@ -658,7 +658,7 @@ class ServiceDeskGUI:
             if not self.is_running:
                 return
             
-            # Select role (skip if L2 / L3 Analyst is already on the dashboard)
+            # Select role (skip if any known role is already on the dashboard)
             self.update_progress("Memeriksa role...")
             self.update_status("Memeriksa role")
             self.log("🎭 Memeriksa role...")
@@ -669,7 +669,8 @@ class ServiceDeskGUI:
                 return
             
             if getattr(self.automation, "role_already_selected", False):
-                self.log("✅ Role L2 / L3 Analyst sudah aktif — pemilihan role dilewati")
+                role_name = getattr(self.automation, "detected_role", None) or "sudah aktif"
+                self.log(f"✅ Role '{role_name}' sudah aktif — pemilihan role dilewati")
             else:
                 self.log("✅ Role berhasil dipilih!")
             
