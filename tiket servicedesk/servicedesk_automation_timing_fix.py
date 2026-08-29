@@ -21,6 +21,72 @@ class ServiceDeskAutomation:
         self.driver = None
         self.browser_type = "firefox"  # Default to Firefox
         self.location = ""
+        self.role_already_selected = False
+        self.detected_role = None
+
+    # Any of these already shown as the dashboard role button means skip the picker.
+    KNOWN_ROLES = (
+        "L2 / L3 Analyst",
+        "Mobile Self Service",
+        "Self Service IT",
+        "Self Service User",
+    )
+    ROLE_BUTTON_XPATH = (
+        "//button[@type='button' and contains(@class, 'x-btn-text')]"
+    )
+    ROLE_PICKER_XPATH = "/html/body/div[4]/div/form/div[3]"
+    ROLE_SUBMIT_XPATH = "/html/body/div[4]/div/form/div[4]/div/button"
+
+    def _normalize_role_text(self, text):
+        return " ".join((text or "").split())
+
+    def get_active_dashboard_role(self):
+        """Return the already-applied dashboard role name, or None.
+
+        After login, HEAT may land on the dashboard with the current role already
+        applied (ExtJS button, e.g. id=ext-gen50 class=x-btn-text). Match any known
+        role from the picker list, not only L2 / L3 Analyst.
+        """
+        if not self.driver:
+            return None
+
+        known = {self._normalize_role_text(name): name for name in self.KNOWN_ROLES}
+
+        try:
+            for btn in self.driver.find_elements(By.XPATH, self.ROLE_BUTTON_XPATH):
+                if not btn.is_displayed():
+                    continue
+                label = self._normalize_role_text(btn.text)
+                if label in known:
+                    return known[label]
+        except Exception:
+            pass
+
+        # Fallback: recorded ExtJS id, only if the label is a known role.
+        try:
+            btn = self.driver.find_element(By.ID, "ext-gen50")
+            if btn.is_displayed():
+                label = self._normalize_role_text(btn.text)
+                if label in known:
+                    return known[label]
+        except NoSuchElementException:
+            pass
+
+        return None
+
+    def is_role_already_active(self):
+        """True if dashboard already shows a known role button."""
+        return self.get_active_dashboard_role() is not None
+
+    def _role_picker_visible(self):
+        """True if the post-login role picker form is on screen."""
+        if not self.driver:
+            return False
+        try:
+            el = self.driver.find_element(By.XPATH, self.ROLE_PICKER_XPATH)
+            return el.is_displayed()
+        except NoSuchElementException:
+            return False
         
     def setup_driver(self, headless=False):
         """Initialize the WebDriver"""
@@ -145,19 +211,35 @@ class ServiceDeskAutomation:
             return False
     
     def select_role(self):
-        """Select the Self Service User role"""
+        """Select a role, or skip if any known role is already active on the dashboard."""
         try:
             if not self.driver:
                 print("❌ WebDriver not initialized")
                 return False
-                
+
+            self.role_already_selected = False
+            self.detected_role = None
             print("Looking for role selection...")
-            time.sleep(5)
-            
+
+            # Wait until either a dashboard role button or the role picker appears.
+            try:
+                WebDriverWait(self.driver, 15).until(
+                    lambda d: self.is_role_already_active() or self._role_picker_visible()
+                )
+            except TimeoutException:
+                print("⚠️ Neither an active role button nor role picker appeared yet")
+
+            active_role = self.get_active_dashboard_role()
+            if active_role:
+                self.role_already_selected = True
+                self.detected_role = active_role
+                print(f"✅ Role '{active_role}' already detected — skipping role selection")
+                return True
+
             # Try to find and click role
             try:
                 role_div = WebDriverWait(self.driver, 10).until(
-                    EC.element_to_be_clickable((By.XPATH, "/html/body/div[4]/div/form/div[3]"))
+                    EC.element_to_be_clickable((By.XPATH, self.ROLE_PICKER_XPATH))
                 )
                 role_div.click()
                 print("✅ Role selected")
@@ -168,7 +250,7 @@ class ServiceDeskAutomation:
             # Submit role selection
             try:
                 submit_button = WebDriverWait(self.driver, 10).until(
-                    EC.element_to_be_clickable((By.XPATH, "/html/body/div[4]/div/form/div[4]/div/button"))
+                    EC.element_to_be_clickable((By.XPATH, self.ROLE_SUBMIT_XPATH))
                 )
                 submit_button.click()
                 print("✅ Role submitted")
