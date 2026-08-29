@@ -218,10 +218,31 @@ class ServiceDeskGUI:
         self.location_var = tk.StringVar(value=self.saved_settings.get('location', ''))
         self.location_entry = ttk.Entry(settings_frame, textvariable=self.location_var, width=40)
         self.location_entry.grid(row=1, column=1, sticky='nsew', padx=(0, 10), pady=(10, 0))
+
+        # Browser selection — Auto uses Firefox (project driver cache) then existing Chrome
+        ttk.Label(settings_frame, text="Browser:").grid(row=2, column=0, sticky='w', padx=(0, 10), pady=(10, 0))
+        self.browser_labels = {
+            "auto": "Otomatis (Firefox, lalu Chrome yang sudah ada)",
+            "firefox": "Firefox (driver di folder proyek)",
+            "chrome": "Chrome (browser yang sudah terpasang)",
+        }
+        self.browser_label_to_value = {label: value for value, label in self.browser_labels.items()}
+        saved_browser = self.saved_settings.get("browser", "auto")
+        if saved_browser not in self.browser_labels:
+            saved_browser = "auto"
+        self.browser_var = tk.StringVar(value=self.browser_labels[saved_browser])
+        self.browser_combo = ttk.Combobox(
+            settings_frame,
+            textvariable=self.browser_var,
+            values=list(self.browser_labels.values()),
+            state="readonly",
+            width=40,
+        )
+        self.browser_combo.grid(row=2, column=1, sticky="w", padx=(0, 10), pady=(10, 0))
         
         # Options
         options_frame = ttk.Frame(settings_frame)
-        options_frame.grid(row=2, column=0, columnspan=3, sticky='nsew', pady=(10, 0))
+        options_frame.grid(row=3, column=0, columnspan=3, sticky='nsew', pady=(10, 0))
         
         # First row of options
         self.headless_var = tk.BooleanVar(value=self.saved_settings.get('headless_mode', False))
@@ -299,6 +320,7 @@ class ServiceDeskGUI:
         self.location_var.trace('w', lambda *args: self.save_settings())
         self.headless_var.trace('w', lambda *args: self.save_settings())
         self.screenshots_var.trace('w', lambda *args: self.save_settings())
+        self.browser_var.trace('w', lambda *args: self.save_settings())
         
         # Initialize mode indicator
         self.update_mode_indicator()
@@ -346,7 +368,8 @@ class ServiceDeskGUI:
                 # fast_mode removed
                 'location': self.location_var.get().strip(),
                 'headless_mode': self.headless_var.get(),
-                'screenshots': self.screenshots_var.get()
+                'screenshots': self.screenshots_var.get(),
+                'browser': self.browser_label_to_value.get(self.browser_var.get(), 'auto'),
             }
             with open(self.settings_file, 'w', encoding='utf-8') as f:
                 json.dump(settings, f, indent=2, ensure_ascii=False)
@@ -624,7 +647,9 @@ class ServiceDeskGUI:
             # Setup automation
             self.automation = ServiceDeskAutomation()
             
-            self.automation.browser_type = "firefox"
+            self.automation.browser_type = self.browser_label_to_value.get(
+                self.browser_var.get(), "auto"
+            )
             self.automation.location = location
             # self.automation.ticket_file = excel_file
             
@@ -634,10 +659,15 @@ class ServiceDeskGUI:
             # Setup driver
             headless = self.headless_var.get()
             if not self.automation.setup_driver(headless=headless):
+                for line in getattr(self.automation, "setup_log", []):
+                    self.log(line)
                 self.log("❌ Gagal menyiapkan browser")
+                self.log("Letakkan geckodriver di folder 'drivers/' atau pasang Firefox/Chrome.")
                 self.automation_finished()
                 return
-            
+
+            for line in getattr(self.automation, "setup_log", []):
+                self.log(line)
             self.log("✅ Browser berhasil disiapkan!")
             
             if not self.is_running:
