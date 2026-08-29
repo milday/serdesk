@@ -651,7 +651,7 @@ class ServiceDeskGUI:
                 self.browser_var.get(), "auto"
             )
             self.automation.location = location
-            # self.automation.ticket_file = excel_file
+            self.automation.ticket_file = excel_file
             
             self.update_progress("Menyiapkan browser...")
             self.update_status("Menyiapkan browser")
